@@ -1,4 +1,3 @@
-import com.fasterxml.jackson.core.JsonParser;
 import okhttp3.*;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -7,7 +6,14 @@ import org.telegram.telegrambots.meta.api.methods.send.SendMessage;
 import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 
-import java.io.*;
+import java.io.IOException;
+import java.time.LocalTime;
+import java.time.format.DateTimeFormatter;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledExecutorService;
 
 
 public class simpleBot extends TelegramLongPollingBot {
@@ -15,6 +21,7 @@ public class simpleBot extends TelegramLongPollingBot {
     private static final String GEMINI_API_KEY = "AIzaSyB5jUwRl-1xTGHYIReFWSPwjXmHL-iVccM";
     private static final String GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=AIzaSyB5jUwRl-1xTGHYIReFWSPwjXmHL-iVccM";
     private final OkHttpClient client = new OkHttpClient();
+    private final Map<String, Boolean> waitingForAlarmTime = new HashMap<>();
 
     @Override
     public String getBotUsername() {
@@ -33,13 +40,48 @@ public class simpleBot extends TelegramLongPollingBot {
             String chatId = update.getMessage().getChatId().toString();
 
             try {
-                String aiResponse = callGeminiAPI(userMessage);
-                if (aiResponse == null || aiResponse.isBlank()) {
-                    aiResponse = "Xin lỗi, tôi chưa hiểu yêu cầu của bạn.";
-                }
+                if (userMessage.equals("/alarm")) {
+                    // Người dùng chọn lệnh /alarm
+                    waitingForAlarmTime.put(chatId, true);
 
-                // Kiểm tra độ dài của phản hồi AI và gửi
-                sendTelegramMessage(chatId, aiResponse);
+                    SendMessage message = new SendMessage();
+                    message.setChatId(chatId);
+                    message.setText("Hãy nhập thời gian báo thức theo định dạng HH:mm (ví dụ: 14:30)");
+                    execute(message);
+
+                } else if (waitingForAlarmTime.getOrDefault(chatId, false)) {
+                    // Người dùng đang nhập thời gian báo thức
+                    waitingForAlarmTime.remove(chatId); // Đã nhận thời gian => xoá trạng thái đợi
+
+                    LocalTime alarmTime;
+                    try {
+                        alarmTime = LocalTime.parse(userMessage, DateTimeFormatter.ofPattern("HH:mm"));
+                    } catch (Exception e) {
+                        // Nếu nhập sai định dạng
+                        SendMessage error = new SendMessage();
+                        error.setChatId(chatId);
+                        error.setText("Định dạng thời gian không hợp lệ! Vui lòng nhập theo dạng HH:mm (ví dụ: 14:30)");
+                        execute(error);
+                        return;
+                    }
+
+                    scheduleAlarm(chatId, alarmTime);
+
+                    SendMessage confirm = new SendMessage();
+                    confirm.setChatId(chatId);
+                    confirm.setText("Báo thức đã được đặt lúc " + alarmTime.toString());
+                    execute(confirm);
+
+                } else {
+                    // Xử lý các tin nhắn khác (ví dụ hỏi Gemini API)
+                    String aiResponse = callGeminiAPI(userMessage);
+                    if (aiResponse == null || aiResponse.isBlank()) {
+                        aiResponse = "Xin lỗi, tôi chưa hiểu yêu cầu của bạn.";
+                    }
+
+                    // Kiểm tra độ dài của phản hồi AI và gửi
+                    sendTelegramMessage(chatId, aiResponse);
+                }
             } catch (Exception e) {
                 e.printStackTrace();
                 try {
@@ -92,7 +134,6 @@ public class simpleBot extends TelegramLongPollingBot {
     }
 
 
-
     private String extractTextFromGeminiResponse(String responseBody) {
         try {
             // Sử dụng JSONObject để parse chuỗi JSON
@@ -139,6 +180,24 @@ public class simpleBot extends TelegramLongPollingBot {
         execute(sendMessage);
     }
 
+    private void scheduleAlarm(String chatId, LocalTime alarmTime) {
+        LocalTime now = LocalTime.now();
+        long delayInSeconds = now.until(alarmTime, java.time.temporal.ChronoUnit.SECONDS);
 
+        if (delayInSeconds < 0) {
+            delayInSeconds += 24 * 60 * 60; // Nếu giờ đã qua hôm nay thì hẹn sang ngày mai
+        }
 
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        scheduler.schedule(() -> {
+            try {
+                SendMessage alarmMessage = new SendMessage();
+                alarmMessage.setChatId(chatId);
+                alarmMessage.setText("⏰ Báo thức! Đã đến giờ bạn hẹn.");
+                execute(alarmMessage);
+            } catch (TelegramApiException e) {
+                e.printStackTrace();
+            }
+        }, delayInSeconds, TimeUnit.SECONDS);
+    }
 }
